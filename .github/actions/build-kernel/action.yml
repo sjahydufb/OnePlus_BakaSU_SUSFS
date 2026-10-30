@@ -983,7 +983,22 @@ runs:
         fi
         
         cd KernelSU
-        
+        KSU_INPUT="${{ inputs.ksu_branch_or_hash }}"
+        if [[ ! "$KSU_INPUT" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::A full pinned BakaSU SHA is required for the OP15 port"
+          exit 1
+        fi
+        if [ "$(git rev-parse HEAD)" != "$KSU_INPUT" ]; then
+          echo "BakaSU setup.sh did not check out the requested commit; fetching it exactly"
+          git fetch --no-tags --force origin "$KSU_INPUT" || exit 1
+          git checkout --force --detach "$KSU_INPUT"
+        fi
+        test "$(git rev-parse HEAD)" = "$KSU_INPUT" || {
+          echo "::error::Wrong BakaSU SHA"; exit 1;
+        }
+        git cat-file -e "${KSU_INPUT}^{tree}" || exit 1
+        echo "Exact BakaSU checkout: $KSU_INPUT"
+
         BASE_VERSION=30700
         KSU_VERSION=$(expr $(/usr/bin/git rev-list --count HEAD) "+" $BASE_VERSION)
         
@@ -999,6 +1014,21 @@ runs:
         echo "BakaSU Version: $KSU_VERSION"
         echo "✅ BakaSU added (commit: ${KSU_COMMIT_SHA:0:8})"
         echo "::endgroup::"
+
+    - name: OP15 BakaSU - apply SELinux PR3938 timing port
+      shell: bash
+      if: ${{ inputs.ksu_type == 'BakaSU' && env.OP_MODEL == 'OP15' && env.OP_OS_VERSION == 'OOS16' }}
+      run: |
+        set -euo pipefail
+        test "$OP_DS" = 'false' || { echo "::error::DroidSpaces is enabled"; exit 1; }
+        test "$OP_LXC_DS" = 'false' || { echo "::error::LXC DroidSpaces is enabled"; exit 1; }
+        BAKA_SOURCE="$KERNEL_PLATFORM_FOLDER/KernelSU/kernel/feature/selinux_hide.c"
+        python3 "$GITHUB_WORKSPACE/.github/scripts/patch-bakasu-pr3938.py" "$BAKA_SOURCE"
+        grep -q 'BAKASU_PR3938_OP15_PORT' "$BAKA_SOURCE" || { echo "::error::Port is missing"; exit 1; }
+        test "$(git -C "$KERNEL_PLATFORM_FOLDER/KernelSU" rev-parse HEAD)" = "$KSU_COMMIT_SHA" || {
+          echo "::error::BakaSU checkout SHA changed unexpectedly"; exit 1;
+        }
+        echo "PASS: BakaSU pinned and PR3938 timing port applied on 6.12; NoDroid verified"
 
     - name: Apply SUSFS Patches
       shell: bash
