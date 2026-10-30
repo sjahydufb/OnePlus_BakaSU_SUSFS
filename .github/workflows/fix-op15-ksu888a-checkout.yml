@@ -1,0 +1,94 @@
+name: Fix OP15 KSU888a exact commit checkout
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fix-op15-ksu888a-checkout
+  cancel-in-progress: false
+
+jobs:
+  patch-exact-ksu-commit:
+    name: Patch existing OP15 NoDroid branch (no kernel build)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out existing OP15 branch
+        uses: actions/checkout@v4
+        with:
+          ref: op15-ksu888a-susfs-nodroid-web
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Fix KernelSU fallback and verify NoDroid settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYFIX'
+          from pathlib import Path
+          import json
+          p = Path('.github/actions/build-kernel/action.yml')
+          src = p.read_text(encoding='utf-8')
+          needle = '        fi\n        \n        git submodule update --init --recursive\n        cd KernelSU/kernel'
+          marker = 'Exact KernelSU commit checkout:'
+          if marker in src:
+              print('Already fixed; skipping')
+          else:
+              if src.count(needle) != 1:
+                  raise SystemExit(f'Unexpected build action format: needle count={src.count(needle)}')
+              replacement = '''        fi
+
+                  # setup.sh may silently fall back to main if the requested commit tree
+                  # is not available in its local Git object database.
+                  KSU_REPO="$KERNEL_PLATFORM_FOLDER/KernelSU"
+                  test -d "$KSU_REPO/.git" || { echo "::error::KernelSU clone missing"; exit 1; }
+                  if [ "$(git -C "$KSU_REPO" rev-parse HEAD)" != "$KSU_INPUT" ]; then
+                    echo "Fetching exact KernelSU commit: $KSU_INPUT"
+                    if ! git -C "$KSU_REPO" fetch --no-tags --force origin "$KSU_INPUT"; then
+                      echo "Primary fetch failed; retrying exact commit from PR contributor fork"
+                      git -C "$KSU_REPO" fetch --no-tags --force https://github.com/0ctobot/KernelSU.git "$KSU_INPUT" || {
+                        echo "::error::Cannot fetch requested KernelSU commit $KSU_INPUT"
+                        exit 1
+                      }
+                    fi
+                    git -C "$KSU_REPO" checkout --force --detach "$KSU_INPUT"
+                  fi
+                  actual_ksu_sha="$(git -C "$KSU_REPO" rev-parse HEAD)"
+                  [ "$actual_ksu_sha" = "$KSU_INPUT" ] || {
+                    echo "::error::KernelSU checkout mismatch: $actual_ksu_sha"
+                    exit 1
+                  }
+                  git -C "$KSU_REPO" cat-file -e "${KSU_INPUT}^{tree}" || {
+                    echo "::error::KernelSU tree missing: $KSU_INPUT"
+                    exit 1
+                  }
+                  echo "Exact KernelSU commit checkout: $actual_ksu_sha"
+
+                  git submodule update --init --recursive
+                  cd KernelSU/kernel'''
+              src = src.replace(needle, replacement, 1)
+              p.write_text(src, encoding='utf-8')
+          config = json.loads(Path('configs/oos16/OP15.json').read_text(encoding='utf-8'))
+          assert config['susfs'] is True and config['ds'] is False and config['lxc_ds'] is False
+          assert 'Verify OP15 KSU commit and PR3938 source' in src
+          assert 'Verify SUSFS plus PR3938 survived integration' in src
+          assert '- name: Add Droidspaces support' not in src
+          assert '- name: Add LXC / Droidspaces support' not in src
+          assert src.count(marker) == 1
+          print('PASS: KernelSU SHA fetch guard; SUSFS and NoDroid preserved')
+          PYFIX
+          git diff --check
+          git diff --stat
+          if git diff --quiet; then
+            echo 'No changes to commit'
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add .github/actions/build-kernel/action.yml
+            git commit -m 'OP15: fetch exact KSU888a tree before SUSFS integration'
+            git push origin HEAD:refs/heads/op15-ksu888a-susfs-nodroid-web
+          fi
+          echo '### Fixed branch: `op15-ksu888a-susfs-nodroid-web`' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Exact KSU checkout logic fixed; kernel has NOT been built.' >> "$GITHUB_STEP_SUMMARY"
