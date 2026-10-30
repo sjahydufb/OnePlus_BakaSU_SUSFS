@@ -935,7 +935,33 @@ runs:
         else
           curl --fail --location --proto '=https' -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s "$KSU_INPUT"
         fi
-        
+
+        # setup.sh may silently fall back to main if the requested commit tree
+        # is not available in its local Git object database.
+        KSU_REPO="$KERNEL_PLATFORM_FOLDER/KernelSU"
+        test -d "$KSU_REPO/.git" || { echo "::error::KernelSU clone missing"; exit 1; }
+        if [ "$(git -C "$KSU_REPO" rev-parse HEAD)" != "$KSU_INPUT" ]; then
+          echo "Fetching exact KernelSU commit: $KSU_INPUT"
+          if ! git -C "$KSU_REPO" fetch --no-tags --force origin "$KSU_INPUT"; then
+            echo "Primary fetch failed; retrying exact commit from PR contributor fork"
+            git -C "$KSU_REPO" fetch --no-tags --force https://github.com/0ctobot/KernelSU.git "$KSU_INPUT" || {
+              echo "::error::Cannot fetch requested KernelSU commit $KSU_INPUT"
+              exit 1
+            }
+          fi
+          git -C "$KSU_REPO" checkout --force --detach "$KSU_INPUT"
+        fi
+        actual_ksu_sha="$(git -C "$KSU_REPO" rev-parse HEAD)"
+        [ "$actual_ksu_sha" = "$KSU_INPUT" ] || {
+          echo "::error::KernelSU checkout mismatch: $actual_ksu_sha"
+          exit 1
+        }
+        git -C "$KSU_REPO" cat-file -e "${KSU_INPUT}^{tree}" || {
+          echo "::error::KernelSU tree missing: $KSU_INPUT"
+          exit 1
+        }
+        echo "Exact KernelSU commit checkout: $actual_ksu_sha"
+
         git submodule update --init --recursive
         cd KernelSU/kernel
         BASE_VERSION=30000
