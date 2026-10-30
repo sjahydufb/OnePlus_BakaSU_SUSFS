@@ -909,6 +909,18 @@ runs:
         echo "::endgroup::"
 
 
+    - name: Guard OP15 KSU888a SUSFS NoDroid build inputs
+      shell: bash
+      if: ${{ env.OP_MODEL == 'OP15' }}
+      run: |
+        set -euo pipefail
+        [ '${{ inputs.ksu_type }}' = 'KSU' ] || { echo '::error::Select KSU (not BakaSU)'; exit 1; }
+        [ '${{ inputs.ksu_branch_or_hash }}' = '888a8ee59b599dfa0f97ec722d2a0d3374876f52' ] || { echo '::error::Wrong KernelSU SHA'; exit 1; }
+        [ "$OP_SUSFS" = 'true' ] || { echo '::error::SUSFS must be true'; exit 1; }
+        [ "$OP_DS" = 'false' ] || { echo '::error::DroidSpaces must be false'; exit 1; }
+        [ "$OP_LXC_DS" = 'false' ] || { echo '::error::LXC DS must be false'; exit 1; }
+        echo 'OP15 input guard: PASS'
+
     - name: Add KernelSU
       shell: bash
       if: ${{ inputs.ksu_type == 'KSU' }}
@@ -1000,6 +1012,25 @@ runs:
         echo "✅ BakaSU added (commit: ${KSU_COMMIT_SHA:0:8})"
         echo "::endgroup::"
 
+    - name: Verify OP15 KSU commit and PR3938 source
+      if: ${{ inputs.ksu_type == 'KSU' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        expected="888a8ee59b599dfa0f97ec722d2a0d3374876f52"
+        expected_blob="b49e00cdd07bfaf760aec1d09ed280537db8e41b"
+        actual="$(git -C "$KSU_FOLDER" rev-parse HEAD)"
+        [ "$actual" = "$expected" ] || { echo "::error::Wrong KernelSU commit: $actual"; exit 1; }
+        file="$KSU_FOLDER/kernel/feature/selinux_hide.c"
+        [ -f "$file" ] || { echo "::error::Missing selinux_hide.c"; exit 1; }
+        blob="$(git -C "$KSU_FOLDER" hash-object kernel/feature/selinux_hide.c)"
+        [ "$blob" = "$expected_blob" ] || {
+          echo "::error::SELinux source differs from PR #3938 blob: $blob"
+          exit 1
+        }
+        echo "Verified KernelSU $actual with exact PR #3938 SELinux source $blob"
+        echo "KSU PR3938 pinned: $actual ($blob)" >> "$GITHUB_STEP_SUMMARY"
+
     - name: Apply SUSFS Patches
       shell: bash
       if: ${{ env.OP_SUSFS == 'true' }}
@@ -1031,7 +1062,7 @@ runs:
           "v1.5.8")
             if [ "${{ inputs.ksu_type }}" = "KSU" ]; then
               cd "$KSU_FOLDER"
-              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
             else
               echo "ℹ️ Skipping KernelSU folder patch for BakaSU"
             fi
@@ -1039,7 +1070,7 @@ runs:
           "v1.5.9"|"v1.5.10"|"v1.5.11"|"v1.5.12"|"v2.0.0"|"v2.1.0")
             if [ "${{ inputs.ksu_type }}" = "KSU" ]; then
               cd "$KSU_FOLDER"
-              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
             else
               echo "ℹ️ Skipping KernelSU folder patch for BakaSU"
             fi
@@ -1047,7 +1078,7 @@ runs:
           "v2.2.0"|"v2.3.0")
             if [ "${{ inputs.ksu_type }}" = "KSU" ]; then
               cd "$KSU_FOLDER"
-              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+              patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
             else
               echo "ℹ️ Skipping KernelSU folder patch for BakaSU"
             fi
@@ -1411,6 +1442,31 @@ runs:
         
         echo "::endgroup::"
         
+    - name: Verify SUSFS plus PR3938 survived integration
+      if: ${{ inputs.ksu_type == 'KSU' && env.OP_SUSFS == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        src="$KSU_FOLDER/kernel/feature/selinux_hide.c"
+        kc="$KSU_FOLDER/kernel/Kconfig"
+        [ -f "$src" ] || { echo "::error::selinux_hide.c not found after patch"; exit 1; }
+        [ -f "$kc" ] || { echo "::error::KernelSU Kconfig missing"; exit 1; }
+        grep -Fq 'scontext2_onstack[128]' "$src" || { echo "::error::PR3938 stack buffer lost"; exit 1; }
+        grep -Fq 'scontext3_onstack[128]' "$src" || { echo "::error::PR3938 second stack buffer lost"; exit 1; }
+        grep -Fq 'retry_live:' "$src" || { echo "::error::PR3938 live policy retry lost"; exit 1; }
+        if grep -Fq 'orig_scontextp' "$src"; then
+          echo "::error::Legacy dual policy parser reintroduced"
+          exit 1
+        fi
+        grep -Eq '^[[:space:]]*config[[:space:]]+KSU_SUSFS[[:space:]]*$' "$kc" || {
+          echo "::error::SUSFS Kconfig integration missing"; exit 1;
+        }
+        [ -f "$COMMON_KERNEL_FOLDER/fs/susfs.c" ] || { echo "::error::SUSFS kernel source missing"; exit 1; }
+        defconfig="$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
+        grep -qx 'CONFIG_KSU=y' "$defconfig" || { echo 'CONFIG_KSU=y' >> "$defconfig"; }
+        grep -qx 'CONFIG_KSU_SUSFS=y' "$defconfig" || { echo 'CONFIG_KSU_SUSFS=y' >> "$defconfig"; }
+        echo "Verified SUSFS source/Kconfig and PR #3938 timing source remain integrated"
+        echo "Built-in SUSFS patch integration source check: PASS" >> "$GITHUB_STEP_SUMMARY"
     - name: Add BBG
       if: ${{ env.OP_BBG == 'true' }}
       shell: bash
@@ -2036,114 +2092,6 @@ runs:
         fi
 
         echo "✅ Dynamic USB DWC3 configs added"
-        echo "::endgroup::"
-
-    - name: Add LXC / Droidspaces support
-      shell: bash
-      if: ${{ env.OP_LXC_DS == 'true' }}
-      run: |
-        set -euo pipefail
-        echo "Add Droidspaces Support"
-        cd "$COMMON_KERNEL_FOLDER"
-        
-        echo "Applying patch to enable SYSVIPC without breaking ABI"
-        if ! patch -p1 --fuzz=2 --forward < "$KERNEL_PATCHES_FOLDER/oneplus/lxc_droidspaces/enable_sysvipc.patch"; then
-          echo "::error::enable_sysvipc patch failed. Dumping all .rej files:"
-          find . -name "*.rej" -exec echo "=== {} ===" \; -exec cat {} \;
-          exit 1
-        fi
-        
-        cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
-        CONFIG_SYSVIPC = y
-        CONFIG_DEVTMPFS = y
-        CONFIG_PID_NS = y
-        CONFIG_POSIX_MQUEUE = y
-        EOF
-
-    - name: Add Droidspaces support
-      shell: bash
-      if: ${{ env.OP_DS == 'true' }}
-      run: |
-        echo "::group::Add Droidspaces Support"
-        set -euo pipefail
-        cd "$COMMON_KERNEL_FOLDER"
-        
-        echo "Applying patch to enable SYSVIPC without breaking ABI"
-        case "$OP_BRANCH" in
-          wild/sm8850|wild/sm8845)
-            if ! patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_a16-6.12.patch"; then
-              echo "::error::fix_sysvipc_kabi_a16-6.12 patch failed. Dumping all .rej files:"
-              find . -name "*.rej" -exec echo "=== {} ===" \; -exec cat {} \;
-              exit 1
-            fi
-            ;;
-          wild/sm8550|wild/sm7550)
-            if ! patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_1_2_3.patch"; then
-              echo "::error::fix_sysvipc_kabi_1_2_3 patch failed. Dumping all .rej files:"
-              find . -name "*.rej" -exec echo "=== {} ===" \; -exec cat {} \;
-              exit 1
-            fi
-            ;;
-          wild/sm8450|wild/sm8475|wild/mt6895|wild/mt6983|wild/mt6789)
-            if [ "$ANDROID_VER" = "android12" ] && [ "$KERNEL_VER" = "5.10" ]; then
-              if ! patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_bypass_a16-6.12_below.patch"; then
-                echo "::error::fix_sysvipc_kabi_bypass_a16-6.12_below patch failed. Dumping all .rej files:"
-                find . -name "*.rej" -exec echo "=== {} ===" \; -exec cat {} \;
-                exit 1
-              fi
-              if ! patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_abi_padding_for_posix_mqueue.patch"; then
-                echo "::error::fix_abi_padding_for_posix_mqueue patch failed. Dumping all .rej files:"
-                find . -name "*.rej" -exec echo "=== {} ===" \; -exec cat {} \;
-                exit 1
-              fi
-            else
-              if ! patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch"; then
-                echo "::error::fix_sysvipc_kabi_6_7_8 patch failed. Dumping all .rej files:"
-                find . -name "*.rej" -exec echo "=== {} ===" \; -exec cat {} \;
-                exit 1
-              fi
-            fi
-            ;;
-          *)
-            if ! patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch"; then
-              echo "::error::fix_sysvipc_kabi_6_7_8 patch failed. Dumping all .rej files:"
-              find . -name "*.rej" -exec echo "=== {} ===" \; -exec cat {} \;
-              exit 1
-            fi
-            ;;
-        esac
-        
-        echo "Patch to fix kernel panic caused by oplus_bsp_midas"
-        if ! patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/droidspaces/0001-Return-ghost-task-if-task-is-null-and-is-requested-b.patch"; then
-          echo "::error::ghost-task patch failed. Dumping all .rej files:"
-          find . -name "*.rej" -exec echo "=== {} ===" \; -exec cat {} \;
-          exit 1
-        fi
-        
-        cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
-        CONFIG_SYSVIPC=y
-        CONFIG_DEVTMPFS=y
-        CONFIG_PID_NS=y
-        CONFIG_POSIX_MQUEUE=y
-        CONFIG_NETFILTER_XT_TARGET_REJECT=y
-        CONFIG_NETFILTER_XT_TARGET_LOG=y
-        CONFIG_NETFILTER_XT_MATCH_RECENT=y
-        CONFIG_USER_NS=y
-        EOF
-        
-        patch -p1 < "$KERNEL_PATCHES_FOLDER/common/droidspaces/0001-Guard-USER_NS-for-non-root-users.patch"
-        
-        if [ "${{ env.OP_RUST_BUILD }}" = "true" ]; then
-          echo "Add IPC NS missing symbols for rust binder"
-          if ! grep -q 'EXPORT_SYMBOL.*put_ipc_ns' "$COMMON_KERNEL_FOLDER/ipc/namespace.c"; then
-            echo -e '\nEXPORT_SYMBOL_GPL(put_ipc_ns);' >> "$COMMON_KERNEL_FOLDER/ipc/namespace.c"
-          fi
-          if ! grep -q 'EXPORT_SYMBOL.*init_ipc_ns' "$COMMON_KERNEL_FOLDER/ipc/msgutil.c"; then
-            echo -e '\nEXPORT_SYMBOL_GPL(init_ipc_ns);' >> "$COMMON_KERNEL_FOLDER/ipc/msgutil.c"
-          fi
-        fi
-        
-        echo "✅ Droidspaces Support applied"
         echo "::endgroup::"
 
     - name: Add Build based configs
