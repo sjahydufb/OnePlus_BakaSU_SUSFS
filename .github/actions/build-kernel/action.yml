@@ -1057,7 +1057,26 @@ runs:
             exit 1
             ;;
         esac
-        
+        if [ "${{ inputs.ksu_type }}" = "KSU" ]; then
+          SRC="$KSU_FOLDER/kernel/feature/selinux_hide.c"
+          if [ ! -f "$SRC" ]; then
+            echo "::error::Missing SELinux Hide source"
+            exit 1
+          fi
+
+          if ! grep -Fq 'const char *source, u32 source_len' "$SRC" || \
+             ! grep -Fq 'retry:' "$SRC"; then
+            echo "::error::KernelSU #3936 fix not found"
+            exit 1
+          fi
+
+          if grep -Fq 'scontext3 = kmemdup_nul' "$SRC"; then
+            echo "::error::Legacy SELinux parser detected"
+            exit 1
+          fi
+
+          echo "KernelSU #3936 source check passed"
+        fi
         cd "$COMMON_KERNEL_FOLDER"
         if [ "${{ env.ANDROID_VER }}" = "android15" ] && [ "${{ env.KERNEL_VER }}" = "6.6" ]; then
           if ! grep -qxF '#include <trace/hooks/fs.h>' ./fs/namespace.c; then
